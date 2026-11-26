@@ -1,0 +1,54 @@
+name: Build QBReader SQLite
+
+on:
+  schedule:
+    - cron: "0 6 1 * *"   # 06:00 UTC on the 1st of every month
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DRIVE_FOLDER: https://drive.google.com/drive/folders/184vCqGAVqUt0G7-K2jG5MH7e2Qm3GzYp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download QBReader dumps from Google Drive
+        run: |
+          pip install gdown
+          python scripts/download_dumps.py --folder "$DRIVE_FOLDER" --out qbdump
+
+      - name: Build database
+        run: |
+          VERSION=$(date -u +%Y-%m-%d)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          python scripts/build_db.py --dump-dir qbdump --out dist --version "$VERSION" \
+            --base-url "https://github.com/${{ github.repository }}/releases/download/db-$VERSION"
+
+      - name: Skip if data is unchanged
+        id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NEW=$(jq -r .sha256 dist/manifest.json)
+          OLD=$(gh release download --pattern manifest.json --output - 2>/dev/null | jq -r .sha256 || true)
+          echo "changed=$([ "$NEW" != "$OLD" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "old=$OLD new=$NEW"
+
+      - name: Publish GitHub Release
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "db-$VERSION" dist/qbreader.sqlite.xz dist/manifest.json \
+            --title "QBReader database $VERSION" \
+            --notes "$(jq -r '"Tossups: \(.counts.tossups)  Bonuses: \(.counts.bonuses)  Sets: \(.counts.sets)  Compressed: \(.compressedSize/1048576|floor) MB"' dist/manifest.json)" \
+            --latest
