@@ -13,9 +13,17 @@ import SQLite3
 /// Requires iOS 15+ (async URLSession). No third-party dependencies.
 public actor QBReaderDatabaseManager {
 
+    /// "full" keeps all QBReader HTML (~900 MB on device); "lite" drops HTML from
+    /// question bodies, lead-ins and bonus parts but keeps answer HTML (~500 MB).
+    public enum Variant: String, Codable, Sendable {
+        case full, lite
+        var manifestName: String { self == .full ? "manifest.json" : "manifest-lite.json" }
+    }
+
     public struct Manifest: Codable, Equatable, Sendable {
         public let version: String
         public let schemaVersion: Int
+        public let variant: Variant?
         public let url: String
         public let compression: String
         public let compressedSize: Int64
@@ -48,14 +56,22 @@ public actor QBReaderDatabaseManager {
     /// SCHEMA_VERSION in scripts/build_db.py when the schema changes.
     public static let supportedSchemaVersion = 1
 
-    public static let shared = QBReaderDatabaseManager(
-        manifestURL: URL(string: "https://github.com/RyanThinkOrSwim/qbreader-db/releases/latest/download/manifest.json")!
-    )
+    public static let releaseBaseURL = URL(string: "https://github.com/RyanThinkOrSwim/qbreader-db/releases/latest/download/")!
+
+    public static let shared = QBReaderDatabaseManager(variant: .full)
+    public static let lite = QBReaderDatabaseManager(variant: .lite)
+
+    /// Both variants install to the same file, so use one manager at a time;
+    /// installing the other variant replaces the current database.
+    public init(variant: Variant) {
+        self.manifestURL = Self.releaseBaseURL.appendingPathComponent(variant.manifestName)
+    }
 
     private let manifestURL: URL
     private let fileManager = FileManager.default
     private let defaults = UserDefaults.standard
     private let versionKey = "QBReaderDatabase.installedVersion"
+    private let variantKey = "QBReaderDatabase.installedVariant"
 
     public init(manifestURL: URL) {
         self.manifestURL = manifestURL
@@ -70,6 +86,11 @@ public actor QBReaderDatabaseManager {
     public var installedVersion: String? {
         guard let url = try? databaseURL, fileManager.fileExists(atPath: url.path) else { return nil }
         return defaults.string(forKey: versionKey)
+    }
+
+    public var installedVariant: Variant? {
+        guard installedVersion != nil else { return nil }
+        return defaults.string(forKey: variantKey).flatMap(Variant.init(rawValue:)) ?? .full
     }
 
     private func directory() throws -> URL {
@@ -89,7 +110,8 @@ public actor QBReaderDatabaseManager {
     public func availableUpdate() async throws -> Manifest? {
         let manifest = try await fetchManifest()
         guard manifest.schemaVersion <= Self.supportedSchemaVersion else { return nil }
-        return manifest.version == installedVersion ? nil : manifest
+        let sameVariant = (manifest.variant ?? .full) == installedVariant
+        return manifest.version == installedVersion && sameVariant ? nil : manifest
     }
 
     /// Downloads and installs the given manifest's database.
@@ -137,6 +159,7 @@ public actor QBReaderDatabaseManager {
         var targetURL = target
         try targetURL.setResourceValues(values)
         defaults.set(manifest.version, forKey: versionKey)
+        defaults.set((manifest.variant ?? .full).rawValue, forKey: variantKey)
     }
 
     /// Convenience: check and install if needed. Returns true if a new database was installed.
@@ -150,6 +173,7 @@ public actor QBReaderDatabaseManager {
     public func removeDatabase() throws {
         try? fileManager.removeItem(at: try databaseURL)
         defaults.removeObject(forKey: versionKey)
+        defaults.removeObject(forKey: variantKey)
     }
 
     // MARK: - Internals

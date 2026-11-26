@@ -6,7 +6,7 @@ import SQLite3
 public struct QBTossup: Identifiable, Hashable, Sendable {
     public let id: Int64
     public let mongoId: String
-    public let question: String            // HTML (<b>, <u>, <i>, power mark "(*)")
+    public let question: String            // HTML (<b>, <u>, <i>, power mark "(*)"); plain text in the lite build
     public let questionSanitized: String   // plain text
     public let answer: String              // HTML; required part is in <b><u>
     public let answerSanitized: String
@@ -22,7 +22,7 @@ public struct QBTossup: Identifiable, Hashable, Sendable {
 
 public struct QBBonusPart: Hashable, Sendable {
     public let index: Int
-    public let part: String
+    public let part: String                // HTML; plain text in the lite build
     public let partSanitized: String
     public let answer: String
     public let answerSanitized: String
@@ -33,7 +33,7 @@ public struct QBBonusPart: Hashable, Sendable {
 public struct QBBonus: Identifiable, Hashable, Sendable {
     public let id: Int64
     public let mongoId: String
-    public let leadin: String
+    public let leadin: String              // HTML; plain text in the lite build
     public let leadinSanitized: String
     public let parts: [QBBonusPart]
     public let category: String
@@ -123,6 +123,9 @@ public final class QBReaderStore: @unchecked Sendable {
         }
     }
 
+    /// True when the lite build is open (no question/part HTML, no phrase search).
+    public var isLite: Bool { meta("variant") == "lite" }
+
     /// Full-text search over question and answer text. `answerOnly` restricts to the answer line.
     public func searchTossups(_ text: String, answerOnly: Bool = false,
                               filter: QBFilter = QBFilter(), limit: Int = 50, offset: Int = 0) -> [QBTossup] {
@@ -180,14 +183,14 @@ public final class QBReaderStore: @unchecked Sendable {
         """
 
     private static func tossup(_ r: Row) -> QBTossup {
-        QBTossup(id: r.int64(0), mongoId: r.text(1), question: r.text(2), questionSanitized: r.text(3),
+        QBTossup(id: r.int64(0), mongoId: r.text(1), question: r.optText(2) ?? r.text(3), questionSanitized: r.text(3),
                  answer: r.text(4), answerSanitized: r.text(5), category: r.text(6), subcategory: r.text(7),
                  alternateSubcategory: r.optText(8), difficulty: r.optInt(9), year: r.int(10),
                  setName: r.text(11), packetName: r.text(12), number: r.int(13))
     }
 
     private static func bonusHead(_ r: Row) -> QBBonus {
-        QBBonus(id: r.int64(0), mongoId: r.text(1), leadin: r.text(2), leadinSanitized: r.text(3), parts: [],
+        QBBonus(id: r.int64(0), mongoId: r.text(1), leadin: r.optText(2) ?? r.text(3), leadinSanitized: r.text(3), parts: [],
                 category: r.text(4), subcategory: r.text(5), alternateSubcategory: r.optText(6),
                 difficulty: r.optInt(7), year: r.int(8), setName: r.text(9), packetName: r.text(10), number: r.int(11))
     }
@@ -197,7 +200,7 @@ public final class QBReaderStore: @unchecked Sendable {
             SELECT part_index, part, part_sanitized, answer, answer_sanitized, value, difficulty_modifier
             FROM bonus_parts WHERE bonus_id = ? ORDER BY part_index
             """, [b.id]) {
-            QBBonusPart(index: $0.int(0), part: $0.text(1), partSanitized: $0.text(2), answer: $0.text(3),
+            QBBonusPart(index: $0.int(0), part: $0.optText(1) ?? $0.text(2), partSanitized: $0.text(2), answer: $0.text(3),
                         answerSanitized: $0.text(4), value: $0.int(5), difficultyModifier: $0.optText(6))
         }) ?? []
         return QBBonus(id: b.id, mongoId: b.mongoId, leadin: b.leadin, leadinSanitized: b.leadinSanitized, parts: parts,

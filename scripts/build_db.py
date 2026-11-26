@@ -9,6 +9,12 @@ Outputs (in --out):
     qbreader.sqlite.xz     LZMA/xz, decodable on iOS with Compression's COMPRESSION_LZMA
     manifest.json          version, schema, sizes, sha256 of both files, row counts
 
+With --variant lite the files are qbreader-lite.sqlite(.xz) and manifest-lite.json.
+Lite keeps the same schema but stores NULL in the long HTML columns
+(tossups.question, bonuses.leadin, bonus_parts.part); readers fall back to the
+*_sanitized text. Answer HTML (required-part markup) is kept. Its FTS index uses
+detail=column, so word and prefix searches work but phrase/NEAR queries do not.
+
 Streams line-by-line, so it runs in well under 1 GB of RAM.
 """
 import argparse
@@ -52,7 +58,7 @@ CREATE TABLE tossups (
     set_id                INTEGER NOT NULL REFERENCES sets(id),
     packet_id             INTEGER NOT NULL REFERENCES packets(id),
     number                INTEGER NOT NULL,
-    question              TEXT NOT NULL,
+    question              TEXT,
     question_sanitized    TEXT NOT NULL,
     answer                TEXT NOT NULL,
     answer_sanitized      TEXT NOT NULL,
@@ -72,7 +78,7 @@ CREATE TABLE bonuses (
     set_id                INTEGER NOT NULL REFERENCES sets(id),
     packet_id             INTEGER NOT NULL REFERENCES packets(id),
     number                INTEGER NOT NULL,
-    leadin                TEXT NOT NULL,
+    leadin                TEXT,
     leadin_sanitized      TEXT NOT NULL,
     part_count            INTEGER NOT NULL,
     category              TEXT NOT NULL,
@@ -88,7 +94,7 @@ CREATE TABLE bonuses (
 CREATE TABLE bonus_parts (
     bonus_id             INTEGER NOT NULL REFERENCES bonuses(id),
     part_index           INTEGER NOT NULL,
-    part                 TEXT NOT NULL,
+    part                 TEXT,
     part_sanitized       TEXT NOT NULL,
     answer               TEXT NOT NULL,
     answer_sanitized     TEXT NOT NULL,
@@ -101,29 +107,34 @@ CREATE TABLE bonus_parts (
 INDEXES = """
 CREATE INDEX packets_set           ON packets(set_id, number);
 CREATE INDEX tossups_filter        ON tossups(difficulty, category, subcategory, year);
-CREATE INDEX tossups_subcat        ON tossups(subcategory, difficulty);
 CREATE INDEX tossups_alt_subcat    ON tossups(alternate_subcategory) WHERE alternate_subcategory IS NOT NULL;
 CREATE INDEX tossups_packet        ON tossups(packet_id, number);
-CREATE INDEX tossups_set           ON tossups(set_id);
 CREATE INDEX bonuses_filter        ON bonuses(difficulty, category, subcategory, year);
-CREATE INDEX bonuses_subcat        ON bonuses(subcategory, difficulty);
 CREATE INDEX bonuses_alt_subcat    ON bonuses(alternate_subcategory) WHERE alternate_subcategory IS NOT NULL;
 CREATE INDEX bonuses_packet        ON bonuses(packet_id, number);
+"""
+
+# Extra indexes the lite build leaves out to stay under 500 MB. Without them,
+# subcategory-only filters use a skip-scan of the *_filter index (still ~30 ms).
+FULL_ONLY_INDEXES = """
+CREATE INDEX tossups_subcat        ON tossups(subcategory, difficulty);
+CREATE INDEX tossups_set           ON tossups(set_id);
+CREATE INDEX bonuses_subcat        ON bonuses(subcategory, difficulty);
 CREATE INDEX bonuses_set           ON bonuses(set_id);
 """
 
 # Contentless FTS5: holds only the search index (rowid = tossups.id / bonuses.id),
 # the text itself is read from the base tables. unicode61 + remove_diacritics 2
 # needs SQLite >= 3.27, which every iOS 13+ device ships.
-FTS = """
+FTS_TEMPLATE = """
 CREATE VIRTUAL TABLE tossups_fts USING fts5(
     question, answer,
-    content='', columnsize=0,
+    content='', columnsize=0,{detail}
     tokenize='unicode61 remove_diacritics 2'
 );
 CREATE VIRTUAL TABLE bonuses_fts USING fts5(
     leadin, parts, answers,
-    content='', columnsize=0,
+    content='', columnsize=0,{detail}
     tokenize='unicode61 remove_diacritics 2'
 );
 """
@@ -175,12 +186,14 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def build(dump_dir, db_path, version):
+def build(dump_dir, db_path, version, variant="full"):
+    lite = variant == "lite"
+    html = (lambda v: None) if lite else (lambda v: v)
     if os.path.exists(db_path):
         os.remove(db_path)
     con = sqlite3.connect(db_path)
     con.executescript("""
-        PRAGMA page_size = 4096;
+        PRAGMA page_size = 16384;
         PRAGMA journal_mode = OFF;
         PRAGMA synchronous = OFF;
         PRAGMA temp_store = FILE;
@@ -235,7 +248,7 @@ def build(dump_dir, db_path, version):
     for n, d in enumerate(ndjson(p("tossups.json")), 1):
         c = common(d)
         batch.append((n, oid(d["_id"]), c["set_id"], c["packet_id"], c["number"],
-                      d["question"], d["question_sanitized"], d["answer"], d["answer_sanitized"],
+                      html(d["question"]), d["question_sanitized"], d["answer"], d["answer_sanitized"],
                       c["category"], c["subcategory"], c["alternate_category"], c["alternate_subcategory"],
                       c["difficulty"], c["year"], c["standard"], c["updated_at"]))
         if len(batch) >= 5000:
@@ -245,7 +258,7 @@ def build(dump_dir, db_path, version):
     tossup_count = n
     log(f"tossups: {tossup_count}")
 
-    con.executescript(FTS)
+    con.executescript(FTS_TEMPLATE.format(detail=" detail=column," if lite else ""))
     con.execute("INSERT INTO tossups_fts(rowid, question, answer) "
                 "SELECT id, question_sanitized, answer_sanitized FROM tossups")
     log("tossups_fts built")
@@ -259,11 +272,11 @@ def build(dump_dir, db_path, version):
         mods = d.get("difficultyModifiers", [])
         k = len(parts)
         batch.append((n, oid(d["_id"]), c["set_id"], c["packet_id"], c["number"],
-                      d["leadin"], d["leadin_sanitized"], k,
+                      html(d["leadin"]), d["leadin_sanitized"], k,
                       c["category"], c["subcategory"], c["alternate_category"], c["alternate_subcategory"],
                       c["difficulty"], c["year"], c["standard"], c["updated_at"]))
         for j in range(k):
-            parts_batch.append((n, j, parts[j], parts_s[j] if j < len(parts_s) else parts[j],
+            parts_batch.append((n, j, html(parts[j]), parts_s[j] if j < len(parts_s) else parts[j],
                                 answers[j] if j < len(answers) else "",
                                 answers_s[j] if j < len(answers_s) else "",
                                 values[j] if j < len(values) and values[j] is not None else 10,
@@ -281,6 +294,8 @@ def build(dump_dir, db_path, version):
     log(f"bonuses: {bonus_count}")
 
     con.executescript(INDEXES)
+    if not lite:
+        con.executescript(FULL_ONLY_INDEXES)
     con.execute("INSERT INTO tossups_fts(tossups_fts) VALUES ('optimize')")
     con.execute("INSERT INTO bonuses_fts(bonuses_fts) VALUES ('optimize')")
     log("indexes + fts optimize done")
@@ -293,6 +308,7 @@ def build(dump_dir, db_path, version):
     meta = {
         "schema_version": str(SCHEMA_VERSION),
         "data_version": version,
+        "variant": variant,
         "built_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "source": "QBReader mongoexport dumps",
         **{f"count_{k}": str(v) for k, v in counts.items()},
@@ -328,20 +344,28 @@ def main():
     ap.add_argument("--dump-dir", default="qbdump")
     ap.add_argument("--out", default="dist")
     ap.add_argument("--version", default=dt.date.today().isoformat())
+    ap.add_argument("--variant", choices=["full", "lite"], default="full")
     ap.add_argument("--base-url", default="",
                     help="URL prefix where the .xz will be hosted, e.g. a GitHub Release download URL")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
-    db = os.path.join(args.out, "qbreader.sqlite")
+    stem = "qbreader" if args.variant == "full" else "qbreader-lite"
+    db = os.path.join(args.out, stem + ".sqlite")
     xz = db + ".xz"
-    counts = build(args.dump_dir, db, args.version)
+    counts = build(args.dump_dir, db, args.version, args.variant)
     compress_xz(db, xz)
+
+    src = hashlib.sha256()
+    for name in ("sets.json", "packets.json", "tossups.json", "bonuses.json"):
+        src.update(sha256(os.path.join(args.dump_dir, name)).encode())
 
     manifest = {
         "version": args.version,
+        "sourceSha256": src.hexdigest(),
         "schemaVersion": SCHEMA_VERSION,
-        "url": (args.base_url.rstrip("/") + "/qbreader.sqlite.xz") if args.base_url else "qbreader.sqlite.xz",
+        "variant": args.variant,
+        "url": (args.base_url.rstrip("/") + "/" if args.base_url else "") + stem + ".sqlite.xz",
         "compression": "lzma",
         "compressedSize": os.path.getsize(xz),
         "compressedSha256": sha256(xz),
@@ -349,9 +373,10 @@ def main():
         "sha256": sha256(db),
         "counts": counts,
     }
-    with open(os.path.join(args.out, "manifest.json"), "w") as f:
+    manifest_name = "manifest.json" if args.variant == "full" else "manifest-lite.json"
+    with open(os.path.join(args.out, manifest_name), "w") as f:
         json.dump(manifest, f, indent=2)
-    log("manifest.json written")
+    log(f"{manifest_name} written")
     print(json.dumps(manifest, indent=2))
 
 

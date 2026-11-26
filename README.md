@@ -5,13 +5,23 @@ file from GitHub Releases and installed on-device by the iOS app.
 
 ## Current build
 
-| | |
-|---|---|
-| Source | QBReader mongoexport dumps (Google Drive folder `184vCqGAVqUt0G7-K2jG5MH7e2Qm3GzYp`) |
-| Rows | 184,089 tossups · 156,503 bonuses (464,826 parts) · 8,829 packets · 692 sets |
-| Download (`qbreader.sqlite.xz`) | ~201 MB |
-| On device (`qbreader.sqlite`) | ~897 MB |
-| Search | FTS5, diacritic-insensitive (`bronte` matches `Brontë`) |
+Source: QBReader mongoexport dumps (Google Drive folder `184vCqGAVqUt0G7-K2jG5MH7e2Qm3GzYp`).
+Both builds hold the same rows: 184,089 tossups, 156,503 bonuses (464,826 parts),
+8,829 packets and 692 sets. Search is FTS5 and ignores accents (`bronte` matches `Brontë`).
+
+| | Full | Lite |
+|---|---|---|
+| Manifest | `manifest.json` | `manifest-lite.json` |
+| Download | `qbreader.sqlite.xz`, ~200 MB | `qbreader-lite.sqlite.xz`, ~55 MB |
+| On device | ~850 MB | ~490 MB |
+| Question / lead-in / part HTML | yes | no (plain text) |
+| Answer HTML (required part in `<b><u>`) | yes | yes |
+| Phrase / NEAR search | yes | no (word and prefix search work) |
+| Extra subcategory + set indexes | yes | no (subcategory filters still ~30 ms) |
+
+Both builds share one schema. In lite, `tossups.question`, `bonuses.leadin` and
+`bonus_parts.part` are NULL. `QBReaderStore` falls back to the `*_sanitized`
+text, so app code doesn't change. `meta.variant` says which build is open.
 
 ## Layout
 
@@ -29,6 +39,8 @@ ios/QBReaderStore.swift      read-only queries: random by filter, full-text sear
 pip install gdown
 python3 scripts/download_dumps.py --folder https://drive.google.com/drive/folders/184vCqGAVqUt0G7-K2jG5MH7e2Qm3GzYp --out qbdump
 python3 scripts/build_db.py --dump-dir qbdump --out dist \
+  --base-url https://github.com/RyanThinkOrSwim/qbreader-db/releases/download/db-$(date +%F)
+python3 scripts/build_db.py --dump-dir qbdump --out dist --variant lite \
   --base-url https://github.com/RyanThinkOrSwim/qbreader-db/releases/download/db-$(date +%F)
 ```
 
@@ -63,15 +75,15 @@ that is not in `sets.json`, and no questions reference them, so they are skipped
 Requires iOS 15+. Uses only system frameworks: Foundation, Compression, CryptoKit, SQLite3.
 
 1. Add both files in `ios/` to the app target. Link `libsqlite3.tbd` (Build Phases > Link Binary).
-2. Set the manifest URL in `QBReaderDatabaseManager.shared` to
-   `https://github.com/RyanThinkOrSwim/qbreader-db/releases/latest/download/manifest.json`.
-   The repo must be public, or the asset URLs must be otherwise reachable without auth.
+2. Pick a build: `QBReaderDatabaseManager.shared` (full) or `QBReaderDatabaseManager.lite`.
+   Both read from `https://github.com/RyanThinkOrSwim/qbreader-db/releases/latest/download/`.
+   Both install to the same file, so switching from one to the other replaces the current database.
 3. Pro unlock / settings screen:
 
 ```swift
-let manager = QBReaderDatabaseManager.shared
+let manager = QBReaderDatabaseManager.lite   // or .shared for full
 if let update = try await manager.availableUpdate() {
-    // update.compressedSize -> show "Download 201 MB (needs ~900 MB free)"
+    // update.compressedSize / update.size -> "Download 55 MB (needs ~490 MB free)"
     try await manager.install(update) { p in
         Task { @MainActor in self.progress = p }
     }
