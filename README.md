@@ -12,8 +12,8 @@ Both builds hold the same rows: 184,089 tossups, 156,503 bonuses (464,826 parts)
 | | Full | Lite |
 |---|---|---|
 | Manifest | `manifest.json` | `manifest-lite.json` |
-| Download | `qbreader.sqlite.xz`, ~200 MB | `qbreader-lite.sqlite.xz`, ~55 MB |
-| On device | ~850 MB | ~490 MB |
+| Download | `qbreader.sqlite.xz`, ~199 MB | `qbreader-lite.sqlite.xz`, ~136 MB |
+| On device | ~800 MB | ~492 MB |
 | Question / lead-in / part HTML | yes | no (plain text) |
 | Answer HTML (required part in `<b><u>`) | yes | yes |
 | Phrase / NEAR search | yes | no (word and prefix search work) |
@@ -83,7 +83,7 @@ Requires iOS 15+. Uses only system frameworks: Foundation, Compression, CryptoKi
 ```swift
 let manager = QBReaderDatabaseManager.lite   // or .shared for full
 if let update = try await manager.availableUpdate() {
-    // update.compressedSize / update.size -> "Download 55 MB (needs ~490 MB free)"
+    // update.compressedSize / update.size -> "Download 136 MB (needs ~492 MB free)"
     try await manager.install(update) { p in
         Task { @MainActor in self.progress = p }
     }
