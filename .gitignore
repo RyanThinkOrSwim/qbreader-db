@@ -1,0 +1,4 @@
+dist/
+qbdump/
+.tmp/
+build.log
